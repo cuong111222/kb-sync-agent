@@ -1,0 +1,86 @@
+name: Daily Knowledge Base Sync Job
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: API_KEY
+    env:
+      API_KEY: ${{ secrets.API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      MIN_ARTICLES: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: |
+          pytest -v
+
+      - name: Restore previous sync state (Cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            state.json
+            data/
+          key: kb-sync-v4-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            kb-sync-v4-${{ runner.os }}-
+
+      - name: Run Daily Sync Job (Delta Ingestion)
+        id: sync
+        run: |
+          echo "Secret detection check:"
+          echo "API_KEY: $( [ -n "$API_KEY" ] && echo 'DETECTED' || echo 'NOT SET' )"
+          echo "GEMINI_API_KEY: $( [ -n "$GEMINI_API_KEY" ] && echo 'DETECTED' || echo 'NOT SET' )"
+          echo "OPENAI_API_KEY: $( [ -n "$OPENAI_API_KEY" ] && echo 'DETECTED' || echo 'NOT SET' )"
+
+          if [ -n "$API_KEY" ] || [ -n "$GEMINI_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
+            python main.py
+            echo "synced=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No API_KEY secret configured in GitHub repository. Running --ci-mode dry run."
+            python main.py --ci-mode
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save updated sync state to Cache
+        uses: actions/cache/save@v4
+        if: steps.sync.outputs.synced == 'true'
+        with:
+          path: |
+            state.json
+            data/
+          key: kb-sync-v4-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Archive Last Run Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sync-state-artifacts
+          path: |
+            state.json
+            data/markdown/
